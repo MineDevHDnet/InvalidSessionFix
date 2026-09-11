@@ -1,0 +1,13 @@
+[
+  {
+    "modid": "invalidsessionfix",
+    "name": "InvalidSessionFix",
+    "description": "Repairs expired Minecraft sessions automatically for MultiMC-based Minecraft 1.8.9 instances.",
+    "version": "${version}",
+    "mcversion": "1.8.9",
+    "url": "https://github.com/MineDevHDnet/InvalidSessionFix",
+    "authorList": ["MineDev_HD"],
+    "credits": "MineDevHD.net",
+    "requiredMods": []
+  }
+]
