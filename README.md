@@ -91,6 +91,12 @@ Minecraft laeuft
 - verweigert das Einsetzen einer erneuerten Session, wenn Minecraft-Profil und aktuell gestarteter Account nicht zusammenpassen
 - erstellt vor einer Aenderung ein lokales Backup der MultiMC-Accountdatei
 
+## Release
+
+Aktuelle stabile Version: **v1.0.0**
+
+Die Release-JAR wird reproduzierbar durch GitHub Actions mit Java 8 und ForgeGradle gebaut.
+
 ## Build
 
 ```bash
