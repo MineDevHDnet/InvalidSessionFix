@@ -3,6 +3,7 @@ package net.minedevhd.invalidsessionfix.auth;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 
 import java.io.IOException;
 import java.util.LinkedHashMap;
@@ -122,7 +123,7 @@ public final class MicrosoftSessionRefresher {
 
     private XToken authorizeMinecraft(XToken userToken) throws IOException, AuthException {
         JsonArray userTokens = new JsonArray();
-        userTokens.add(userToken.token);
+        userTokens.add(new JsonPrimitive(userToken.token));
 
         JsonObject properties = new JsonObject();
         properties.addProperty("SandboxId", "RETAIL");
