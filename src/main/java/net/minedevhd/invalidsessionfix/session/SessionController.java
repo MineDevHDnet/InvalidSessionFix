@@ -19,8 +19,11 @@ import net.minecraftforge.fml.relauncher.ReflectionHelper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Locale;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -165,7 +168,7 @@ public final class SessionController {
             }
 
             store.persist(result);
-            replaceSession(minecraft, session, result.minecraftAccessToken);
+            replaceSessionOnClientThread(minecraft, session, result.minecraftAccessToken);
 
             lastSuccessAt = System.currentTimeMillis();
             setStatus("Session erfolgreich repariert");
@@ -214,7 +217,7 @@ public final class SessionController {
         return value == null ? null : value.replace("-", "").toLowerCase(Locale.ROOT);
     }
 
-    private void replaceSession(
+    private void replaceSessionOnClientThread(
         final Minecraft minecraft,
         final Session previous,
         final String accessToken
@@ -227,15 +230,43 @@ public final class SessionController {
         );
 
         try {
-            ReflectionHelper.setPrivateValue(
+            Future<?> future = minecraft.addScheduledTask(new Runnable() {
+                @Override
+                public void run() {
+                    setSessionField(minecraft, replacement);
+                }
+            });
+            future.get(5L, TimeUnit.SECONDS);
+        } catch (Exception ex) {
+            throw new AuthException("Minecraft-Session konnte zur Laufzeit nicht ersetzt werden.", ex);
+        }
+    }
+
+    private static void setSessionField(Minecraft minecraft, Session replacement) {
+        try {
+            Field sessionField = ReflectionHelper.findField(
                 Minecraft.class,
-                minecraft,
-                replacement,
                 "session",
                 "field_71449_j"
             );
-        } catch (RuntimeException ex) {
-            throw new AuthException("Minecraft-Session konnte zur Laufzeit nicht ersetzt werden.", ex);
+            sessionField.setAccessible(true);
+
+            if (Modifier.isFinal(sessionField.getModifiers())) {
+                try {
+                    Field modifiersField = Field.class.getDeclaredField("modifiers");
+                    modifiersField.setAccessible(true);
+                    modifiersField.setInt(
+                        sessionField,
+                        sessionField.getModifiers() & ~Modifier.FINAL
+                    );
+                } catch (ReflectiveOperationException ignored) {
+                    // Java 8 exposes Field#modifiers. If a launcher hides it, Field#set is still attempted below.
+                }
+            }
+
+            sessionField.set(minecraft, replacement);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Could not replace Minecraft.session", ex);
         }
     }
 
