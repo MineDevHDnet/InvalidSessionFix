@@ -45,7 +45,7 @@ public final class MultiMcAccountStore {
         }
 
         throw new AuthException(
-            "MultiMC accounts.json wurde nicht gefunden. Die Mod erwartet eine MultiMC-Instanz mit Microsoft-Konto."
+            "MultiMC accounts.json wurde nicht gefunden oder enthaelt den gestarteten Microsoft-Account nicht."
         );
     }
 
@@ -163,7 +163,7 @@ public final class MultiMcAccountStore {
         }
 
         JsonArray accounts = root.getAsJsonArray("accounts");
-        JsonObject activeFallback = null;
+        String normalizedProfileId = normalizeId(profileId);
 
         for (JsonElement element : accounts) {
             if (!element.isJsonObject()) {
@@ -179,18 +179,9 @@ public final class MultiMcAccountStore {
             String candidateName = profile == null ? null : getString(profile, "name");
             String candidateId = profile == null ? null : normalizeId(getString(profile, "id"));
 
-            if (same(candidateName, username) || same(candidateId, normalizeId(profileId))) {
+            if (same(candidateName, username) || same(candidateId, normalizedProfileId)) {
                 return account;
             }
-
-            if (account.has("active") && account.get("active").isJsonPrimitive()
-                && account.get("active").getAsBoolean()) {
-                activeFallback = account;
-            }
-        }
-
-        if (activeFallback != null) {
-            return activeFallback;
         }
 
         throw new AuthException("Kein passendes Microsoft-Konto in MultiMC accounts.json gefunden.");
