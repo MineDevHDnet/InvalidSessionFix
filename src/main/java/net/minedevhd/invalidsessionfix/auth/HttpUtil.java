@@ -82,7 +82,7 @@ final class HttpUtil {
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
         connection.setReadTimeout(READ_TIMEOUT_MS);
         connection.setUseCaches(false);
-        connection.setRequestProperty("User-Agent", "InvalidSessionFix/1.0.0");
+        connection.setRequestProperty("User-Agent", "InvalidSessionFix/1.1.0");
         connection.setRequestProperty("Accept", "application/json");
 
         if (contentType != null) {
