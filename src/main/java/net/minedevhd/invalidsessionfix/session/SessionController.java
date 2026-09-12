@@ -2,8 +2,8 @@ package net.minedevhd.invalidsessionfix.session;
 
 import net.minedevhd.invalidsessionfix.auth.AuthException;
 import net.minedevhd.invalidsessionfix.auth.AuthResult;
+import net.minedevhd.invalidsessionfix.auth.AuthTokenStore;
 import net.minedevhd.invalidsessionfix.auth.MicrosoftSessionRefresher;
-import net.minedevhd.invalidsessionfix.auth.MultiMcAccountStore;
 import net.minedevhd.invalidsessionfix.config.ModConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiDisconnected;
@@ -19,8 +19,11 @@ import net.minecraftforge.fml.relauncher.ReflectionHelper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.awt.Desktop;
+import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.net.URI;
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -34,6 +37,7 @@ public final class SessionController {
 
     private final ModConfig config;
     private final MicrosoftSessionRefresher refresher = new MicrosoftSessionRefresher();
+    private final AuthTokenStore tokenStore;
     private final ScheduledExecutorService executor;
     private final AtomicBoolean repairInProgress = new AtomicBoolean(false);
 
@@ -44,6 +48,11 @@ public final class SessionController {
 
     public SessionController(ModConfig config) {
         this.config = config;
+        File tokenFile = new File(
+            Minecraft.getMinecraft().mcDataDir,
+            "config/invalidsessionfix-auth.json"
+        );
+        this.tokenStore = new AuthTokenStore(tokenFile);
         this.executor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
             @Override
             public Thread newThread(Runnable runnable) {
@@ -55,11 +64,15 @@ public final class SessionController {
     }
 
     public void start() {
+        if (!tokenStore.hasRefreshToken()) {
+            setStatus("Einmalige Verknuepfung noetig: /sessionfix login");
+        }
+
         executor.scheduleWithFixedDelay(
             new Runnable() {
                 @Override
                 public void run() {
-                    if (config.isAutoRepair()) {
+                    if (config.isAutoRepair() && tokenStore.hasRefreshToken()) {
                         validateAndRepair(false, false, false);
                     }
                 }
@@ -85,7 +98,11 @@ public final class SessionController {
         boolean disconnected = minecraft.currentScreen instanceof GuiDisconnected;
         if (disconnected && !disconnectScreenSeen && config.isAutoRepair()) {
             disconnectScreenSeen = true;
-            requestValidation(true);
+            if (tokenStore.hasRefreshToken()) {
+                requestValidation(true);
+            } else {
+                setStatus("Nicht verknuepft: /sessionfix login");
+            }
         } else if (!disconnected) {
             disconnectScreenSeen = false;
         }
@@ -107,6 +124,85 @@ public final class SessionController {
                 validateAndRepair(reconnectAfterRepair, true, true);
             }
         });
+    }
+
+    public void requestLogin() {
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                loginInteractive();
+            }
+        });
+    }
+
+    public void requestLogout() {
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    tokenStore.clear();
+                    setStatus("Microsoft-Verknuepfung geloescht");
+                    notifyClient("§aInvalidSessionFix-Verknuepfung wurde geloescht. MultiMC wurde nicht veraendert.");
+                } catch (AuthException ex) {
+                    setStatus("Fehler: " + ex.getMessage());
+                    notifyClient("§c" + ex.getMessage());
+                }
+            }
+        });
+    }
+
+    private void loginInteractive() {
+        if (!repairInProgress.compareAndSet(false, true)) {
+            notifyClient("§eEine Session-Aktion laeuft bereits.");
+            return;
+        }
+
+        try {
+            Minecraft minecraft = Minecraft.getMinecraft();
+            Session session = minecraft.getSession();
+            if (session == null) {
+                throw new AuthException("Keine Minecraft-Session vorhanden.");
+            }
+
+            setStatus("Microsoft-Verknuepfung wird gestartet...");
+            MicrosoftSessionRefresher.DeviceCode code = refresher.beginDeviceLogin();
+
+            notifyClient("§fMicrosoft-Anmeldung: §b" + code.verificationUri);
+            notifyClient("§fCode: §e" + code.userCode + " §7(Browser wird geoeffnet)");
+            openBrowser(code.verificationUriComplete != null
+                ? code.verificationUriComplete
+                : code.verificationUri);
+
+            setStatus("Warte auf Microsoft-Anmeldung...");
+            AuthResult result = refresher.completeDeviceLogin(code);
+
+            if (!sameAccount(session, result)) {
+                throw new AuthException(
+                    "Der angemeldete Microsoft-Account passt nicht zum aktuell gestarteten Minecraft-Account."
+                );
+            }
+
+            tokenStore.persist(result);
+            replaceSessionOnClientThread(minecraft, session, result.minecraftAccessToken);
+            lastSuccessAt = System.currentTimeMillis();
+            setStatus("Microsoft-Verknuepfung aktiv");
+            notifyClient("§aMicrosoft-Verknuepfung gespeichert. MultiMC accounts.json bleibt unangetastet.");
+            LOGGER.info(
+                "InvalidSessionFix private auth linked for {}. Token store: {}",
+                session.getUsername(),
+                tokenStore.getTokenFile().getAbsolutePath()
+            );
+        } catch (AuthException ex) {
+            setStatus("Fehler: " + ex.getMessage());
+            LOGGER.warn("InvalidSessionFix login failed: {}", ex.getMessage());
+            notifyClient("§cMicrosoft-Verknuepfung fehlgeschlagen: §7" + ex.getMessage());
+        } catch (Throwable ex) {
+            setStatus("Unerwarteter Fehler: " + ex.getClass().getSimpleName());
+            LOGGER.error("Unexpected InvalidSessionFix login failure", ex);
+            notifyClient("§cUnerwarteter Fehler bei der Microsoft-Verknuepfung. Siehe Log.");
+        } finally {
+            repairInProgress.set(false);
+        }
     }
 
     private void validateAndRepair(
@@ -151,14 +247,16 @@ public final class SessionController {
                 }
             }
 
-            setStatus("Session wird repariert...");
-            MultiMcAccountStore store = MultiMcAccountStore.locate(
-                minecraft.mcDataDir,
-                session.getUsername(),
-                session.getPlayerID()
-            );
+            if (!tokenStore.hasRefreshToken()) {
+                setStatus("Nicht verknuepft: /sessionfix login");
+                if (userVisible) {
+                    notifyClient("§eEinmal /sessionfix login ausfuehren. MultiMC-Tokens werden ab v1.1 nicht mehr verwendet.");
+                }
+                return;
+            }
 
-            String refreshToken = store.readRefreshToken();
+            setStatus("Session wird repariert...");
+            String refreshToken = tokenStore.readRefreshToken();
             AuthResult result = refresher.refresh(refreshToken);
 
             if (!sameAccount(session, result)) {
@@ -167,15 +265,15 @@ public final class SessionController {
                 );
             }
 
-            store.persist(result);
+            // Persist only our own rotated token. Never read/write MultiMC accounts.json.
+            tokenStore.persist(result);
             replaceSessionOnClientThread(minecraft, session, result.minecraftAccessToken);
 
             lastSuccessAt = System.currentTimeMillis();
             setStatus("Session erfolgreich repariert");
             LOGGER.info(
-                "Minecraft session repaired for {}. MultiMC account store: {}",
-                session.getUsername(),
-                store.getAccountsFile().getAbsolutePath()
+                "Minecraft session repaired for {} using InvalidSessionFix private token store.",
+                session.getUsername()
             );
             notifyClient("§aSession automatisch erneuert.");
 
@@ -297,6 +395,19 @@ public final class SessionController {
         }, 1200L, TimeUnit.MILLISECONDS);
     }
 
+    private static void openBrowser(String url) {
+        if (url == null || url.trim().isEmpty()) {
+            return;
+        }
+        try {
+            if (Desktop.isDesktopSupported()) {
+                Desktop.getDesktop().browse(new URI(url));
+            }
+        } catch (Exception ex) {
+            LOGGER.debug("Could not open Microsoft verification URL automatically", ex);
+        }
+    }
+
     private void notifyClient(final String message) {
         Minecraft.getMinecraft().addScheduledTask(new Runnable() {
             @Override
@@ -339,6 +450,10 @@ public final class SessionController {
 
     public boolean isAutoReconnect() {
         return config.isAutoReconnect();
+    }
+
+    public boolean isLinked() {
+        return tokenStore.hasRefreshToken();
     }
 
     public void setAutoRepair(boolean enabled) {
