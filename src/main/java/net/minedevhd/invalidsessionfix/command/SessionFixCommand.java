@@ -23,7 +23,7 @@ public final class SessionFixCommand extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/sessionfix <status|check|repair|auto|reconnect>";
+        return "/sessionfix <status|login|logout|check|repair|auto|reconnect>";
     }
 
     @Override
@@ -44,6 +44,18 @@ public final class SessionFixCommand extends CommandBase {
         }
 
         String action = args[0].toLowerCase(Locale.ROOT);
+        if ("login".equals(action) || "link".equals(action)) {
+            sender.addChatMessage(prefix("§7Microsoft-Verknuepfung wird gestartet..."));
+            controller.requestLogin();
+            return;
+        }
+
+        if ("logout".equals(action) || "unlink".equals(action)) {
+            sender.addChatMessage(prefix("§7InvalidSessionFix-Verknuepfung wird geloescht..."));
+            controller.requestLogout();
+            return;
+        }
+
         if ("check".equals(action)) {
             sender.addChatMessage(prefix("§7Session-Pruefung gestartet..."));
             controller.requestValidation(false);
@@ -51,6 +63,10 @@ public final class SessionFixCommand extends CommandBase {
         }
 
         if ("repair".equals(action) || "now".equals(action)) {
+            if (!controller.isLinked()) {
+                sender.addChatMessage(prefix("§eNoch nicht verknuepft. Fuehre zuerst /sessionfix login aus."));
+                return;
+            }
             sender.addChatMessage(prefix("§7Erzwungene Session-Reparatur gestartet..."));
             controller.requestForcedRepair(false);
             return;
@@ -83,6 +99,9 @@ public final class SessionFixCommand extends CommandBase {
 
     private void sendStatus(ICommandSender sender) {
         sender.addChatMessage(prefix("§fStatus: §7" + controller.getStatus()));
+        sender.addChatMessage(prefix(
+            "§fMicrosoft-Link: " + (controller.isLinked() ? "§aaktiv" : "§cnicht eingerichtet")
+        ));
         sender.addChatMessage(prefix(
             "§fAuto-Fix: " + (controller.isAutoRepair() ? "§aan" : "§caus")
                 + " §8| §fReconnect: " + (controller.isAutoReconnect() ? "§aan" : "§caus")

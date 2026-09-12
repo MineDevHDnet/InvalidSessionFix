@@ -11,12 +11,14 @@ import java.util.Map;
 
 public final class MicrosoftSessionRefresher {
     /*
-     * MultiMC's public Microsoft OAuth application id. The refresh token in
-     * MultiMC's accounts.json is issued to this public client, so the same
-     * client id has to be used when refreshing it.
+     * MultiMC's public Microsoft OAuth application id. InvalidSessionFix uses
+     * the same public client for its own device-flow login, but keeps its own
+     * refresh token. It never consumes MultiMC's accounts.json refresh token.
      */
     private static final String MULTIMC_CLIENT_ID = "499546d9-bbfe-4b9b-a086-eb3d75afb78f";
 
+    private static final String DEVICE_CODE_ENDPOINT =
+        "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
     private static final String TOKEN_ENDPOINT =
         "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
     private static final String XBOX_USER_ENDPOINT =
@@ -32,6 +34,31 @@ public final class MicrosoftSessionRefresher {
         VALID,
         INVALID,
         UNKNOWN
+    }
+
+    public static final class DeviceCode {
+        public final String deviceCode;
+        public final String userCode;
+        public final String verificationUri;
+        public final String verificationUriComplete;
+        public final long expiresInSeconds;
+        public final long intervalSeconds;
+
+        private DeviceCode(
+            String deviceCode,
+            String userCode,
+            String verificationUri,
+            String verificationUriComplete,
+            long expiresInSeconds,
+            long intervalSeconds
+        ) {
+            this.deviceCode = deviceCode;
+            this.userCode = userCode;
+            this.verificationUri = verificationUri;
+            this.verificationUriComplete = verificationUriComplete;
+            this.expiresInSeconds = expiresInSeconds;
+            this.intervalSeconds = intervalSeconds;
+        }
     }
 
     public Validation validate(String minecraftAccessToken) {
@@ -56,41 +83,121 @@ public final class MicrosoftSessionRefresher {
         }
     }
 
+    public DeviceCode beginDeviceLogin() throws AuthException {
+        Map<String, String> form = new LinkedHashMap<String, String>();
+        form.put("client_id", MULTIMC_CLIENT_ID);
+        form.put("scope", "XboxLive.signin offline_access");
+
+        try {
+            HttpUtil.Response response = HttpUtil.postForm(DEVICE_CODE_ENDPOINT, form);
+            ensureSuccess(response, "Microsoft-Gerateanmeldung konnte nicht gestartet werden");
+            JsonObject json = HttpUtil.parseObject(response);
+
+            return new DeviceCode(
+                requiredString(json, "device_code", "Microsoft device code"),
+                requiredString(json, "user_code", "Microsoft user code"),
+                requiredString(json, "verification_uri", "Microsoft verification URI"),
+                optionalString(json, "verification_uri_complete", null),
+                optionalLong(json, "expires_in", 900L),
+                Math.max(1L, optionalLong(json, "interval", 5L))
+            );
+        } catch (IOException ex) {
+            throw new AuthException("Netzwerkfehler beim Start der Microsoft-Anmeldung.", ex);
+        }
+    }
+
+    public AuthResult completeDeviceLogin(DeviceCode code) throws AuthException {
+        if (code == null || code.deviceCode == null || code.deviceCode.trim().isEmpty()) {
+            throw new AuthException("Microsoft-Gerateanmeldung hat keinen gueltigen Code geliefert.");
+        }
+
+        long deadline = System.currentTimeMillis() + Math.max(60L, code.expiresInSeconds) * 1000L;
+        long interval = Math.max(1L, code.intervalSeconds);
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(interval * 1000L);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new AuthException("Microsoft-Anmeldung wurde abgebrochen.", ex);
+            }
+
+            Map<String, String> form = new LinkedHashMap<String, String>();
+            form.put("client_id", MULTIMC_CLIENT_ID);
+            form.put("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
+            form.put("device_code", code.deviceCode);
+
+            try {
+                HttpUtil.Response response = HttpUtil.postForm(TOKEN_ENDPOINT, form);
+                if (response.status >= 200 && response.status < 300) {
+                    return finishMicrosoftLogin(HttpUtil.parseObject(response));
+                }
+
+                JsonObject error = safeParse(response);
+                String errorCode = optionalString(error, "error", "");
+                if ("authorization_pending".equalsIgnoreCase(errorCode)) {
+                    continue;
+                }
+                if ("slow_down".equalsIgnoreCase(errorCode)) {
+                    interval += 5L;
+                    continue;
+                }
+                if ("authorization_declined".equalsIgnoreCase(errorCode)
+                    || "access_denied".equalsIgnoreCase(errorCode)) {
+                    throw new AuthException("Microsoft-Anmeldung wurde abgelehnt.");
+                }
+                if ("expired_token".equalsIgnoreCase(errorCode)) {
+                    throw new AuthException("Microsoft-Anmeldecode ist abgelaufen. Nutze /sessionfix login erneut.");
+                }
+
+                ensureSuccess(response, "Microsoft-Anmeldung ist fehlgeschlagen");
+            } catch (IOException ex) {
+                throw new AuthException("Netzwerkfehler waehrend der Microsoft-Anmeldung.", ex);
+            }
+        }
+
+        throw new AuthException("Microsoft-Anmeldecode ist abgelaufen. Nutze /sessionfix login erneut.");
+    }
+
     public AuthResult refresh(String refreshToken) throws AuthException {
         if (refreshToken == null || refreshToken.trim().isEmpty()) {
-            throw new AuthException("In MultiMC wurde kein Microsoft-Refresh-Token gefunden.");
+            throw new AuthException("InvalidSessionFix hat keinen eigenen Microsoft-Refresh-Token. Nutze /sessionfix login.");
         }
 
         try {
             JsonObject msa = refreshMicrosoftToken(refreshToken);
-            String msaAccessToken = requiredString(msa, "access_token", "Microsoft access token");
-            String newRefreshToken = optionalString(msa, "refresh_token", refreshToken);
-            long msaExpiresIn = optionalLong(msa, "expires_in", 3600L);
-
-            XToken userToken = authenticateXboxUser(msaAccessToken);
-            XToken minecraftXsts = authorizeMinecraft(userToken);
-            JsonObject minecraftLogin = loginMinecraft(minecraftXsts);
-            String minecraftAccessToken = requiredString(
-                minecraftLogin,
-                "access_token",
-                "Minecraft access token"
-            );
-            long minecraftExpiresIn = optionalLong(minecraftLogin, "expires_in", 86400L);
-
-            JsonObject profile = loadMinecraftProfile(minecraftAccessToken);
-
-            AuthResult result = new AuthResult();
-            result.microsoftAccessToken = msaAccessToken;
-            result.microsoftRefreshToken = newRefreshToken;
-            result.microsoftExpiresIn = msaExpiresIn;
-            result.minecraftAccessToken = minecraftAccessToken;
-            result.minecraftExpiresIn = minecraftExpiresIn;
-            result.profileName = requiredString(profile, "name", "Minecraft profile name");
-            result.profileId = requiredString(profile, "id", "Minecraft profile id");
-            return result;
+            return finishMicrosoftLogin(msa);
         } catch (IOException ex) {
             throw new AuthException("Netzwerkfehler waehrend der Session-Reparatur.", ex);
         }
+    }
+
+    private AuthResult finishMicrosoftLogin(JsonObject msa) throws AuthException, IOException {
+        String msaAccessToken = requiredString(msa, "access_token", "Microsoft access token");
+        String newRefreshToken = requiredString(msa, "refresh_token", "Microsoft refresh token");
+        long msaExpiresIn = optionalLong(msa, "expires_in", 3600L);
+
+        XToken userToken = authenticateXboxUser(msaAccessToken);
+        XToken minecraftXsts = authorizeMinecraft(userToken);
+        JsonObject minecraftLogin = loginMinecraft(minecraftXsts);
+        String minecraftAccessToken = requiredString(
+            minecraftLogin,
+            "access_token",
+            "Minecraft access token"
+        );
+        long minecraftExpiresIn = optionalLong(minecraftLogin, "expires_in", 86400L);
+
+        JsonObject profile = loadMinecraftProfile(minecraftAccessToken);
+
+        AuthResult result = new AuthResult();
+        result.microsoftAccessToken = msaAccessToken;
+        result.microsoftRefreshToken = newRefreshToken;
+        result.microsoftExpiresIn = msaExpiresIn;
+        result.minecraftAccessToken = minecraftAccessToken;
+        result.minecraftExpiresIn = minecraftExpiresIn;
+        result.profileName = requiredString(profile, "name", "Minecraft profile name");
+        result.profileId = requiredString(profile, "id", "Minecraft profile id");
+        return result;
     }
 
     private JsonObject refreshMicrosoftToken(String refreshToken) throws IOException, AuthException {
@@ -101,7 +208,7 @@ public final class MicrosoftSessionRefresher {
         form.put("grant_type", "refresh_token");
 
         HttpUtil.Response response = HttpUtil.postForm(TOKEN_ENDPOINT, form);
-        ensureSuccess(response, "Microsoft-Token konnte nicht erneuert werden");
+        ensureSuccess(response, "InvalidSessionFix-Token konnte nicht erneuert werden");
         return HttpUtil.parseObject(response);
     }
 
@@ -204,6 +311,14 @@ public final class MicrosoftSessionRefresher {
         }
 
         throw new AuthException(message + " (HTTP " + response.status + ")" + suffix);
+    }
+
+    private static JsonObject safeParse(HttpUtil.Response response) {
+        try {
+            return HttpUtil.parseObject(response);
+        } catch (Exception ignored) {
+            return new JsonObject();
+        }
     }
 
     private static String safeMessage(JsonElement value) {

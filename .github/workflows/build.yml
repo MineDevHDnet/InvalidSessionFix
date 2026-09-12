@@ -35,8 +35,8 @@ jobs:
       - name: Upload JAR
         uses: actions/upload-artifact@v4
         with:
-          name: InvalidSessionFix-1.0.0
-          path: build/libs/InvalidSessionFix-1.0.0.jar
+          name: InvalidSessionFix-1.1.0
+          path: build/libs/InvalidSessionFix-1.1.0.jar
           if-no-files-found: error
 
       - name: Create GitHub Release
@@ -44,8 +44,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.0 \
-            build/libs/InvalidSessionFix-1.0.0.jar \
+          gh release create v1.1.0 \
+            build/libs/InvalidSessionFix-1.1.0.jar \
             --target "$GITHUB_SHA" \
-            --title "InvalidSessionFix v1.0.0" \
-            --notes "Erste stabile Version: automatische Microsoft/MultiMC Session-Reparatur fuer Minecraft 1.8.9 Forge/LabyMod 3 mit optionalem Auto-Reconnect."
+            --title "InvalidSessionFix v1.1.0" \
+            --notes "Fix fuer MultiMC Account-Ablauf: Die Mod liest oder veraendert accounts.json nicht mehr. InvalidSessionFix nutzt nach einmaligem /sessionfix login einen eigenen Microsoft Device-Flow Refresh-Token und kann die laufende Minecraft-Session weiterhin automatisch erneuern."
